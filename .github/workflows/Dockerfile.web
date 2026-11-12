@@ -14,6 +14,11 @@ RUN apt-get update \
 
 COPY easytier-web easytier-core easytier-cli /usr/local/bin/
 
+# The binaries do not derive behavior from their filename. Keep the
+# `easytier-web-embed` alias so an existing compose `command:` that invokes
+# that name keeps working after switching to this image.
+RUN ln -sf /usr/local/bin/easytier-web /usr/local/bin/easytier-web-embed
+
 # et.db defaults to the working directory; keep it on a volume so the
 # container can be replaced without losing networks, devices and users.
 ENV TZ=Asia/Shanghai \
