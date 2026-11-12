@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { Button, Column, DataTable, Dialog, InputSwitch, InputText, Message, Skeleton, Tag, useToast } from 'primevue';
 import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
-import { NetworkTypes, UrlListInput, Utils } from 'easytier-frontend-lib';
+import { Config, NetworkTypes, UrlListInput, Utils } from 'easytier-frontend-lib';
 import ApiClient, { type CentralNetworkSettings, type CentralNetworkSummary, type GatewayInfo } from '../modules/api';
 import { normalizeVirtualSubnet } from '../modules/virtual-subnet';
 
@@ -55,6 +55,10 @@ const createForm = ref({
 });
 // Initial nodes in advanced mode, same model as the GUI config form.
 const initialNodes = ref<string[]>([]);
+// Network-level advanced settings inherited by every member; the form is a
+// plain NetworkConfig whose identity fields are ignored server-side.
+const advancedSettingsOpen = ref(false);
+const createAdvancedForm = ref<NetworkTypes.NetworkConfig>(NetworkTypes.DEFAULT_NETWORK_ADVANCED_CONFIG());
 
 const loadNetworks = async () => {
     if (refreshing.value) return;
@@ -103,6 +107,8 @@ const openCreate = () => {
     advancedMode.value = !gatewayEnabled.value;
     initialNodes.value =
         gatewayEnabled.value && gatewayInfo.value?.peer_url ? [gatewayInfo.value.peer_url] : [];
+    advancedSettingsOpen.value = false;
+    createAdvancedForm.value = NetworkTypes.DEFAULT_NETWORK_ADVANCED_CONFIG();
     createVisible.value = true;
 };
 
@@ -110,6 +116,9 @@ const createNetwork = async () => {
     creating.value = true;
     try {
         const virtual_cidr = normalizeVirtualSubnet(createForm.value.virtual_cidr) || null;
+        // An untouched form compiles to schema defaults, which the backend
+        // normalizes away; only explicit edits persist.
+        const advanced_config = NetworkTypes.toBackendNetworkConfig(createAdvancedForm.value);
         let settings: CentralNetworkSettings;
         if (!advancedMode.value && gatewayEnabled.value) {
             settings = {
@@ -120,6 +129,7 @@ const createNetwork = async () => {
                 peer_urls: [],
                 virtual_cidr,
                 secure_mode: createForm.value.secure_mode,
+                advanced_config,
             };
         } else {
             settings = {
@@ -130,6 +140,7 @@ const createNetwork = async () => {
                 peer_urls: initialNodes.value,
                 virtual_cidr,
                 secure_mode: createForm.value.secure_mode,
+                advanced_config,
             };
         }
         const detail = await api?.create_network(settings);
@@ -195,7 +206,8 @@ const openNetwork = (network: CentralNetworkSummary) => {
             </template>
         </section>
 
-        <Dialog v-model:visible="createVisible" modal class="console-dialog" :header="t('web.network_list.create')" :style="{ width: '32rem' }">
+        <Dialog v-model:visible="createVisible" modal class="console-dialog" :header="t('web.network_list.create')"
+            :style="{ width: advancedSettingsOpen ? 'min(52rem, 96vw)' : '32rem' }">
             <div class="flex flex-col gap-3">
                 <div v-if="gatewayEnabled && !advancedMode" class="flex items-start gap-2 p-3 surface-100 rounded-md">
                     <i class="pi pi-check-circle text-green-500 mt-0.5"></i>
@@ -237,6 +249,16 @@ const openNetwork = (network: CentralNetworkSummary) => {
                     <button type="button" class="text-primary text-left" @click="toggleAdvancedMode">
                         {{ advancedMode ? t('web.network_list.use_gateway') : t('web.network_list.advanced_mode') }}
                     </button>
+                </div>
+                <div class="text-sm border-top-1 surface-border pt-3">
+                    <button type="button" class="text-primary text-left" @click="advancedSettingsOpen = !advancedSettingsOpen">
+                        <i class="pi" :class="advancedSettingsOpen ? 'pi-chevron-down' : 'pi-chevron-right'"></i>
+                        {{ t('advanced_settings') }}
+                    </button>
+                    <div class="text-xs text-500 mt-1">{{ t('web.network_list.advanced_settings_hint') }}</div>
+                    <div v-if="advancedSettingsOpen" class="mt-3">
+                        <Config v-model:cur-network="createAdvancedForm" :advanced-only="true" />
+                    </div>
                 </div>
                 <div class="text-sm text-500">{{ t('web.network_list.create_hint') }}</div>
             </div>

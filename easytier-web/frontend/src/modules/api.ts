@@ -67,6 +67,7 @@ export interface CentralNetworkSettings {
     peer_urls: string[];
     virtual_cidr?: string | null;
     secure_mode?: boolean;
+    advanced_config?: NetworkTypes.NetworkConfig | null;
 }
 
 export interface CentralNetworkSummary {
@@ -85,6 +86,7 @@ export interface CentralNetworkDetail extends CentralNetworkSummary {
     virtual_cidr?: string | null;
     public_server_url?: string | null;
     peer_urls: string[];
+    advanced_config?: NetworkTypes.NetworkConfig | null;
 }
 
 export interface CentralNetworkMember {

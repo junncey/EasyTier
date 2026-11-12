@@ -64,6 +64,8 @@ pub enum CompileError {
     InvalidMemberCredential { member_id: Uuid, reason: String },
     #[error("invalid configuration for member {member_id}: {reason}")]
     InvalidMemberConfig { member_id: Uuid, reason: String },
+    #[error("invalid network advanced config: {reason}")]
+    InvalidNetworkAdvancedConfig { reason: String },
     #[error("duplicate ACL rule id: {0}")]
     DuplicateAclRule(String),
     #[error("invalid ACL rule {rule_id}: {reason}")]
@@ -94,6 +96,7 @@ pub fn compile(intent: &CentralNetworkIntent) -> Result<CompiledNetwork, Compile
     let addresses = assign_addresses(intent.virtual_cidr.as_deref(), &members)?;
     let acl = compile_acl(intent.acl_policy.as_ref(), &members);
     let (networking_method, public_server_url, peer_urls) = compile_mode(&intent.mode)?;
+    validate_advanced_config(intent, networking_method, &public_server_url, &peer_urls)?;
     let managed_credentials: Vec<ManagedCredentialConfig> = credentials
         .iter()
         .map(|credential| compile_managed_credential(credential))
@@ -147,8 +150,13 @@ pub fn compile(intent: &CentralNetworkIntent) -> Result<CompiledNetwork, Compile
                 acl: acl.get(&member.id).cloned().flatten(),
                 ..Default::default()
             };
-            let network_config =
-                apply_member_override(base_config, member.config_override.as_ref());
+            // Three layers, later wins per field: network identity base,
+            // network advanced settings, then the member's own override.
+            // Identity and authorization fields always come from the base.
+            let network_config = apply_member_override(
+                apply_member_override(base_config, intent.advanced_config.as_ref()),
+                member.config_override.as_ref(),
+            );
             validate_member_config(&network_config).map_err(|error| {
                 CompileError::InvalidMemberConfig {
                     member_id: member.id,
@@ -190,26 +198,105 @@ fn apply_member_override(
     let Some(config_override) = config_override else {
         return base;
     };
-    let mut merged = config_override.clone();
-    merged.instance_id = base.instance_id;
-    merged.dhcp = base.dhcp;
-    merged.dhcp_ipv4_cidr = base.dhcp_ipv4_cidr;
-    merged.dhcpv6 = base.dhcpv6;
-    merged.dhcp_ipv6_cidr = base.dhcp_ipv6_cidr;
-    merged.virtual_ipv4 = base.virtual_ipv4;
-    merged.network_length = base.network_length;
-    merged.hostname = base.hostname;
-    merged.network_name = base.network_name;
-    merged.network_secret = base.network_secret;
-    merged.networking_method = base.networking_method;
-    merged.public_server_url = base.public_server_url;
-    merged.peer_urls = base.peer_urls;
-    merged.peers = base.peers;
-    merged.secure_mode = base.secure_mode;
-    merged.managed_credentials = base.managed_credentials;
-    merged.acl = base.acl;
-    merged.credential_file = None;
+    let mut merged = merge_with_fallback(&base, config_override);
+    force_central_fields(&mut merged, &base);
     merged
+}
+
+/// Field-level merge: a field present in `overlay` wins, fields it leaves
+/// unset fall back to `base`. Serialization omits unset fields (proto3
+/// JSON), so key presence marks an explicit override; a legacy
+/// full-document override therefore keeps its previous replace semantics.
+fn merge_with_fallback(base: &NetworkConfig, overlay: &NetworkConfig) -> NetworkConfig {
+    let Ok(mut merged) = serde_json::to_value(base) else {
+        return overlay.clone();
+    };
+    let Ok(overlay_value) = serde_json::to_value(overlay) else {
+        return overlay.clone();
+    };
+    if let (Some(target), Some(source)) = (merged.as_object_mut(), overlay_value.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::from_value(merged).unwrap_or_else(|_| overlay.clone())
+}
+
+/// Identity and authorization fields are always owned by the network
+/// intent. Whatever layer is merged on top of `base` (the network advanced
+/// settings or a member override) has these fields replaced, and a local
+/// credential file reference is never allowed through.
+pub fn force_central_fields(merged: &mut NetworkConfig, base: &NetworkConfig) {
+    merged.instance_id = base.instance_id.clone();
+    merged.dhcp = base.dhcp;
+    merged.dhcp_ipv4_cidr = base.dhcp_ipv4_cidr.clone();
+    merged.dhcpv6 = base.dhcpv6;
+    merged.dhcp_ipv6_cidr = base.dhcp_ipv6_cidr.clone();
+    merged.virtual_ipv4 = base.virtual_ipv4.clone();
+    merged.network_length = base.network_length;
+    merged.hostname = base.hostname.clone();
+    merged.network_name = base.network_name.clone();
+    merged.network_secret = base.network_secret.clone();
+    merged.networking_method = base.networking_method;
+    merged.public_server_url = base.public_server_url.clone();
+    merged.peer_urls = base.peer_urls.clone();
+    merged.peers = base.peers.clone();
+    merged.secure_mode = base.secure_mode.clone();
+    merged.managed_credentials = base.managed_credentials.clone();
+    merged.acl = base.acl.clone();
+    merged.credential_file = None;
+}
+
+/// Clear the network-owned identity and authorization fields, e.g. before
+/// persisting a submitted network advanced config or member override: the
+/// compile step always re-supplies them from the network intent.
+pub fn clear_central_fields(config: &mut NetworkConfig) {
+    config.instance_id = None;
+    config.dhcp = None;
+    config.dhcp_ipv4_cidr = None;
+    config.dhcpv6 = None;
+    config.dhcp_ipv6_cidr = None;
+    config.virtual_ipv4 = None;
+    config.network_length = None;
+    config.hostname = None;
+    config.network_name = None;
+    config.network_secret = None;
+    config.networking_method = None;
+    config.public_server_url = None;
+    config.peer_urls = Vec::new();
+    config.peers = Vec::new();
+    config.secure_mode = None;
+    config.managed_credentials = Vec::new();
+    config.acl = None;
+    config.credential_file = None;
+}
+
+/// Validate the network advanced settings even when the network has no
+/// members yet: round-trip them through the config generator on a minimal
+/// identity base.
+fn validate_advanced_config(
+    intent: &CentralNetworkIntent,
+    networking_method: NetworkingMethod,
+    public_server_url: &Option<String>,
+    peer_urls: &[String],
+) -> Result<(), CompileError> {
+    let Some(advanced) = intent.advanced_config.as_ref() else {
+        return Ok(());
+    };
+    let probe_base = NetworkConfig {
+        instance_id: Some(intent.id.to_string()),
+        dhcp: Some(true),
+        network_name: Some(intent.network_name.clone()),
+        network_secret: Some(intent.network_secret.clone()),
+        networking_method: Some(networking_method as i32),
+        public_server_url: public_server_url.clone(),
+        peer_urls: peer_urls.to_vec(),
+        ..Default::default()
+    };
+    let probe = apply_member_override(probe_base, Some(advanced));
+    validate_member_config(&probe).map_err(|error| CompileError::InvalidNetworkAdvancedConfig {
+        reason: format!("{error:#}"),
+    })
 }
 
 fn validate_network(intent: &CentralNetworkIntent) -> Result<(), CompileError> {
@@ -855,6 +942,7 @@ mod tests {
             },
             virtual_cidr: Some("10.42.0.0/29".to_owned()),
             secure_mode: true,
+            advanced_config: None,
             members: vec![temporary.clone(), member(1, "device-a", None)],
             credentials: vec![
                 credential("temporary", Some(temporary.id)),
@@ -1294,5 +1382,116 @@ mod tests {
         assert_eq!(permanent.network_config.dhcpv6, None);
         assert_eq!(permanent.network_config.dhcp_ipv6_cidr, None);
         assert!(permanent.network_config.acl.is_some());
+    }
+
+    #[test]
+    fn network_advanced_config_is_inherited_and_overridden_per_field() {
+        let mut intent = intent();
+        intent.advanced_config = Some(NetworkConfig {
+            mtu: Some(1300),
+            latency_first: Some(true),
+            ..Default::default()
+        });
+        // device-a overrides a single field; device-b inherits as-is.
+        intent.members[1].config_override = Some(NetworkConfig {
+            mtu: Some(1200),
+            ..Default::default()
+        });
+
+        let compiled = compile(&intent).unwrap();
+        let inheriting = compiled
+            .members
+            .iter()
+            .find(|member| member.device_id == "device-b")
+            .unwrap();
+        assert_eq!(inheriting.network_config.mtu, Some(1300));
+        assert_eq!(inheriting.network_config.latency_first, Some(true));
+
+        let overriding = compiled
+            .members
+            .iter()
+            .find(|member| member.device_id == "device-a")
+            .unwrap();
+        assert_eq!(overriding.network_config.mtu, Some(1200));
+        assert_eq!(overriding.network_config.latency_first, Some(true));
+    }
+
+    #[test]
+    fn network_advanced_config_cannot_replace_identity_or_authorization() {
+        let mut intent = intent();
+        intent.advanced_config = Some(NetworkConfig {
+            network_name: Some("tampered".to_owned()),
+            network_secret: Some("tampered".to_owned()),
+            hostname: Some("tampered".to_owned()),
+            virtual_ipv4: Some("192.168.1.1".to_owned()),
+            secure_mode: Some(SecureModeConfig {
+                enabled: false,
+                local_private_key: Some("tampered".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let compiled = compile(&intent).unwrap();
+        for member in &compiled.members {
+            assert_eq!(
+                member.network_config.network_name.as_deref(),
+                Some("engineering")
+            );
+            // Temporary members never receive the secret; permanent ones do.
+            // Either way the tampered value must not pass through.
+            assert_ne!(
+                member.network_config.network_secret.as_deref(),
+                Some("tampered")
+            );
+            assert_ne!(
+                member.network_config.virtual_ipv4.as_deref(),
+                Some("192.168.1.1")
+            );
+            // Secure mode is owned by the intent (enabled there), so the
+            // disabled tampered config never reaches members.
+            assert_eq!(
+                member
+                    .network_config
+                    .secure_mode
+                    .as_ref()
+                    .map(|mode| mode.enabled),
+                Some(true)
+            );
+            // The temporary member keys itself with its issued credential;
+            // nobody gets the tampered key.
+            assert_ne!(
+                member
+                    .network_config
+                    .secure_mode
+                    .as_ref()
+                    .unwrap()
+                    .local_private_key
+                    .as_deref(),
+                Some("tampered")
+            );
+        }
+    }
+
+    #[test]
+    fn network_advanced_config_is_validated_even_without_members() {
+        let mut intent = intent();
+        intent.members.clear();
+        intent.credentials.clear();
+        intent.acl_policy = None;
+        intent.advanced_config = Some(NetworkConfig {
+            mtu: Some(1300),
+            ..Default::default()
+        });
+        assert!(compile(&intent).is_ok());
+
+        intent.advanced_config = Some(NetworkConfig {
+            proxy_cidrs: vec!["not-a-cidr".to_owned()],
+            ..Default::default()
+        });
+        assert!(matches!(
+            compile(&intent),
+            Err(CompileError::InvalidNetworkAdvancedConfig { .. })
+        ));
     }
 }

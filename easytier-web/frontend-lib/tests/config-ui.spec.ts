@@ -7,6 +7,7 @@ import type { FlagMeta } from '../src/generated/proto/annotations'
 import { NetworkConfig as NetworkConfigPb } from '../src/generated/proto/api_manage'
 import { Flags as FlagsPb } from '../src/generated/proto/common'
 import {
+  DEFAULT_NETWORK_ADVANCED_CONFIG,
   DEFAULT_NETWORK_CONFIG,
   normalizeNetworkConfig,
   toBackendNetworkConfig,
@@ -356,12 +357,16 @@ function makeConfig(): NetworkConfig {
   }
 }
 
-function mountConfig(config: NetworkConfig = makeConfig()) {
+function mountConfig(
+  config: NetworkConfig = makeConfig(),
+  extraProps: Record<string, unknown> = {},
+) {
   const curNetwork = reactive(config) as NetworkConfig
   const wrapper = mount(Config, {
     props: {
       curNetwork,
       hostname: 'host-from-prop',
+      ...extraProps,
     },
     global: {
       directives: {
@@ -665,5 +670,55 @@ describe('Config.vue network config projection', () => {
 
     expect(wrapper.emitted('runNetwork')?.[0]).toEqual([curNetwork])
     expect((wrapper.emitted('runNetwork')?.[0][0] as NetworkConfig).network_name).toBe('mesh-running')
+  })
+})
+
+describe('Config.vue advanced-only mode', () => {
+  it('renders only the advanced panel without identity, port-forward and ACL sections', async () => {
+    const { wrapper } = mountConfig(DEFAULT_NETWORK_ADVANCED_CONFIG(), { advancedOnly: true })
+    await nextTick()
+
+    const headers = wrapper
+      .findAll('[data-stub="panel"]')
+      .map((panel) => panel.attributes('data-header'))
+    expect(headers).toContain('advanced_settings')
+    expect(headers).not.toContain('basic_settings')
+    expect(headers).not.toContain('port_forwards')
+    expect(headers).not.toContain('acl.title')
+
+    // Hostname is a per-member identity field; it has no meaning at the
+    // network level and must not appear.
+    expect(wrapper.find('#hostname').exists()).toBe(false)
+    expect(wrapper.find('button[data-label="run_network"]').exists()).toBe(false)
+  })
+
+  it('keeps the full per-device layout in the default mode', async () => {
+    const { wrapper } = mountConfig()
+    await nextTick()
+
+    const headers = wrapper
+      .findAll('[data-stub="panel"]')
+      .map((panel) => panel.attributes('data-header'))
+    expect(headers).toContain('basic_settings')
+    expect(headers).toContain('port_forwards')
+    expect(headers).toContain('acl.title')
+    expect(wrapper.find('#hostname').exists()).toBe(true)
+    expect(wrapper.find('button[data-label="run_network"]').exists()).toBe(true)
+  })
+})
+
+describe('DEFAULT_NETWORK_ADVANCED_CONFIG', () => {
+  it('seeds no listeners so an untouched network-level form stays unspecified', () => {
+    const config = DEFAULT_NETWORK_ADVANCED_CONFIG()
+    expect(config.listener_urls).toEqual([])
+    // The schema defaults the form displays are still in place.
+    expect(config.socks5_port).toBe(1080)
+    expect(config.port_forwards).toEqual([])
+  })
+
+  it('compiles to backend JSON without seeded listeners', () => {
+    const backend = toBackendNetworkConfig(DEFAULT_NETWORK_ADVANCED_CONFIG())
+    // Proto3 JSON omits the empty list entirely: unspecified, not bound.
+    expect(backend.listener_urls ?? []).toEqual([])
   })
 })

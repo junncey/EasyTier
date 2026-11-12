@@ -228,6 +228,18 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
   }
 }
 
+/**
+ * A form seed for editing only network-level advanced settings (the
+ * `advancedOnly` mode of Config.vue): schema defaults, but no seeded
+ * listeners — binding ports is something the user must opt into, unlike
+ * the per-device form where the standard listeners are the norm.
+ */
+export function DEFAULT_NETWORK_ADVANCED_CONFIG(): NetworkConfig {
+  const config = DEFAULT_NETWORK_CONFIG()
+  config.listener_urls = []
+  return config
+}
+
 function cleanPeerUrls(urls: string[] | undefined): string[] {
   return (urls ?? []).map((url) => url.trim()).filter((url) => url.length > 0)
 }

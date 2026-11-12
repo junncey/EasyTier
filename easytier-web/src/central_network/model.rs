@@ -14,6 +14,11 @@ pub struct CentralNetworkIntent {
     pub mode: NetworkMode,
     pub virtual_cidr: Option<String>,
     pub secure_mode: bool,
+    /// Network-level advanced settings. Compiled under the network identity
+    /// base so every member inherits them unless its own override replaces a
+    /// field.
+    #[serde(default)]
+    pub advanced_config: Option<NetworkConfig>,
     pub members: Vec<NetworkMemberIntent>,
     pub credentials: Vec<NetworkCredentialIntent>,
     pub acl_policy: Option<AclPolicy>,

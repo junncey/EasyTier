@@ -80,6 +80,10 @@ pub struct NetworkSettings {
     pub virtual_cidr: Option<String>,
     #[serde(default)]
     pub secure_mode: bool,
+    /// Network-level advanced settings inherited by every member. Replaced
+    /// as a whole on update; `None` clears them.
+    #[serde(default)]
+    pub advanced_config: Option<NetworkConfig>,
 }
 
 impl NetworkSettings {
@@ -162,6 +166,8 @@ pub struct NetworkDetail {
     pub secure_mode: bool,
     pub public_server_url: Option<String>,
     pub peer_urls: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advanced_config: Option<NetworkConfig>,
     pub member_count: usize,
 }
 
@@ -405,6 +411,7 @@ impl CentralNetworkService {
             mode,
             virtual_cidr: settings.virtual_cidr,
             secure_mode: settings.secure_mode,
+            advanced_config: sanitize_advanced_config(settings.advanced_config),
             members: Vec::new(),
             credentials: Vec::new(),
             acl_policy: None,
@@ -431,6 +438,7 @@ impl CentralNetworkService {
             secure_mode: intent.secure_mode,
             public_server_url,
             peer_urls,
+            advanced_config: intent.advanced_config,
             member_count: intent.members.len(),
         })
     }
@@ -457,6 +465,7 @@ impl CentralNetworkService {
         }
         intent.virtual_cidr = request.settings.virtual_cidr;
         intent.secure_mode = request.settings.secure_mode;
+        intent.advanced_config = sanitize_advanced_config(request.settings.advanced_config.take());
         if let Some(secret) = request.network_secret {
             intent.network_secret = secret;
         }
@@ -692,11 +701,7 @@ impl CentralNetworkService {
         device_id: Uuid,
     ) -> Result<NetworkConfig, CentralNetworkServiceError> {
         let intent = self.load(user_id, network_id).await?;
-        let position = member_position(&intent, device_id)?;
-        Ok(intent.members[position]
-            .config_override
-            .clone()
-            .unwrap_or_default())
+        member_effective_config(&intent, device_id)
     }
 
     pub async fn set_member_config(
@@ -709,7 +714,16 @@ impl CentralNetworkService {
         let _mutation = self.mutation_lock.lock().await;
         let mut intent = self.load(user_id, network_id).await?;
         let position = member_position(&intent, device_id)?;
-        intent.members[position].config_override = Some(config);
+
+        // Baseline: what this member would run without its own override,
+        // i.e. network identity plus network advanced settings. Store only
+        // the fields that differ so unchanged fields keep following
+        // network-level updates.
+        let mut baseline_intent = intent.clone();
+        baseline_intent.members[position].config_override = None;
+        let baseline = member_effective_config(&baseline_intent, device_id)?;
+        intent.members[position].config_override = sparse_member_override(&config, &baseline);
+
         sync_member_credential_proxy_cidrs(&mut intent, position)?;
         self.persist(intent).await?;
         self.member_info(user_id, network_id, device_id).await
@@ -1157,6 +1171,73 @@ fn member_position(
         .ok_or_else(|| CentralNetworkServiceError::NotFound(device_id.to_string()))
 }
 
+/// The config a member actually runs: network identity base, then network
+/// advanced settings, then the member's own override.
+fn member_effective_config(
+    intent: &CentralNetworkIntent,
+    device_id: Uuid,
+) -> Result<NetworkConfig, CentralNetworkServiceError> {
+    let member_id = intent
+        .members
+        .iter()
+        .find(|member| member.device_id == device_id.to_string())
+        .map(|member| member.id)
+        .ok_or_else(|| CentralNetworkServiceError::NotFound(device_id.to_string()))?;
+    let compiled = super::compiler::compile(intent).map_err(CentralIntentError::from)?;
+    Ok(compiled
+        .members
+        .into_iter()
+        .find(|member| member.member_id == member_id)
+        .map(|member| member.network_config)
+        .unwrap_or_default())
+}
+
+/// Sanitize a submitted network advanced config: drop the network-owned
+/// identity/authorization fields and normalize an effectively-empty
+/// document to `None`.
+fn sanitize_advanced_config(config: Option<NetworkConfig>) -> Option<NetworkConfig> {
+    let mut config = config?;
+    super::compiler::clear_central_fields(&mut config);
+    (config != NetworkConfig::default()).then_some(config)
+}
+
+/// Reduce a submitted member config to the sparse set of top-level fields
+/// that differ from the member's inherited baseline. Unchanged fields keep
+/// following network-level updates; a fully unchanged submission clears
+/// the override (`None`).
+fn sparse_member_override(
+    submitted: &NetworkConfig,
+    baseline: &NetworkConfig,
+) -> Option<NetworkConfig> {
+    let mut submitted = submitted.clone();
+    super::compiler::clear_central_fields(&mut submitted);
+    let mut baseline = baseline.clone();
+    super::compiler::clear_central_fields(&mut baseline);
+    let fallback = submitted.clone();
+    let Ok(mut submitted_value) = serde_json::to_value(&submitted) else {
+        return Some(fallback);
+    };
+    let Ok(baseline_value) = serde_json::to_value(&baseline) else {
+        return Some(fallback);
+    };
+    if let (Some(target), Some(base)) =
+        (submitted_value.as_object_mut(), baseline_value.as_object())
+    {
+        for key in target.keys().cloned().collect::<Vec<_>>() {
+            if base.get(&key) == target.get(&key) {
+                target.remove(&key);
+            }
+        }
+    }
+    if submitted_value
+        .as_object()
+        .is_some_and(|object| object.is_empty())
+    {
+        return None;
+    }
+    Some(serde_json::from_value(submitted_value).unwrap_or(fallback))
+}
+
 fn credential_peers(
     temporary_peers: &[TemporaryPeerInfo],
     credential_id: &str,
@@ -1565,6 +1646,7 @@ mod tests {
             peer_urls: Vec::new(),
             virtual_cidr: Some("10.88.0.0/24".to_owned()),
             secure_mode: true,
+            advanced_config: None,
         }
     }
 
@@ -1685,6 +1767,120 @@ mod tests {
             ));
             assert_eq!(service.load(user_id, id).await.unwrap(), before);
         }
+    }
+
+    #[tokio::test]
+    async fn member_config_prefills_effective_values_and_saves_sparse_overrides() {
+        let (service, user_id, _) = service().await;
+        let mut settings = standalone_settings();
+        settings.network_name = Some("advanced-engineering".to_owned());
+        settings.advanced_config = Some(NetworkConfig {
+            mtu: Some(1300),
+            latency_first: Some(true),
+            // Identity fields must be stripped on save.
+            network_name: Some("tampered".to_owned()),
+            ..Default::default()
+        });
+        let network = service
+            .create_network(user_id, settings, None)
+            .await
+            .unwrap();
+        let network_id = Uuid::parse_str(&network.network_id).unwrap();
+
+        // The stored advanced config is sanitized to the non-identity fields.
+        let stored = service
+            .get_network(user_id, network_id)
+            .await
+            .unwrap()
+            .advanced_config;
+        assert_eq!(stored.as_ref().and_then(|config| config.mtu), Some(1300));
+        assert_eq!(
+            stored
+                .as_ref()
+                .and_then(|config| config.network_name.clone()),
+            None
+        );
+
+        let device = Uuid::new_v4();
+        register_device(&service, user_id, device).await;
+        service
+            .add_members(
+                user_id,
+                network_id,
+                AddMembersReq {
+                    device_ids: vec![device.to_string()],
+                    temporary: false,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The member config endpoint returns what the device runs: network
+        // identity plus the inherited advanced settings.
+        let effective = service
+            .get_member_config(user_id, network_id, device)
+            .await
+            .unwrap();
+        assert_eq!(effective.mtu, Some(1300));
+        assert_eq!(effective.latency_first, Some(true));
+        assert_eq!(
+            effective.network_name.as_deref(),
+            Some("advanced-engineering")
+        );
+
+        // Saving with one changed field stores only the difference.
+        let mut submitted = effective.clone();
+        submitted.mtu = Some(1200);
+        let member = service
+            .set_member_config(user_id, network_id, device, submitted)
+            .await
+            .unwrap();
+        assert!(member.has_override);
+        let intent = service.load(user_id, network_id).await.unwrap();
+        let stored_override = intent.members[0].config_override.clone().unwrap();
+        assert_eq!(stored_override.mtu, Some(1200));
+        assert_eq!(stored_override.latency_first, None);
+
+        // Network-level updates still propagate to non-overridden fields.
+        let mut update = standalone_settings();
+        update.network_name = Some("advanced-engineering".to_owned());
+        update.advanced_config = Some(NetworkConfig {
+            mtu: Some(1400),
+            latency_first: Some(false),
+            ..Default::default()
+        });
+        service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings: update,
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        let effective = service
+            .get_member_config(user_id, network_id, device)
+            .await
+            .unwrap();
+        assert_eq!(effective.mtu, Some(1200)); // the member's own value wins
+        assert_eq!(effective.latency_first, Some(false)); // inherited update
+
+        // Submitting values that all match the baseline clears the override.
+        let mut reverted = effective.clone();
+        reverted.mtu = Some(1400);
+        let member = service
+            .set_member_config(user_id, network_id, device, reverted)
+            .await
+            .unwrap();
+        assert!(!member.has_override);
+        let effective = service
+            .get_member_config(user_id, network_id, device)
+            .await
+            .unwrap();
+        assert_eq!(effective.mtu, Some(1400));
     }
 
     #[tokio::test]

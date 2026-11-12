@@ -30,6 +30,10 @@ const props = defineProps<{
   hideSecureMode?: boolean
   /// Central members save their clients through the configuration owner.
   editVpnPortalClients?: boolean
+  /// Render only the advanced-settings panel: for callers that edit
+  /// network-level advanced settings where identity, port forwards and ACL
+  /// are owned elsewhere.
+  advancedOnly?: boolean
 }>()
 
 defineEmits(['runNetwork'])
@@ -288,7 +292,7 @@ function removeVpnPortalClient(index: number) {
     <div class="flex flex-col h-full">
       <div class="flex flex-col">
         <div class="w-full self-center ">
-          <Panel :header="t('basic_settings')">
+          <Panel v-if="!advancedOnly" :header="t('basic_settings')">
             <div class="flex flex-col gap-y-2">
               <div class="flex flex-row gap-x-9 flex-wrap">
                 <div class="flex flex-col gap-2 basis-5/12 grow">
@@ -366,9 +370,9 @@ function removeVpnPortalClient(index: number) {
             </div>
           </Panel>
 
-          <Divider />
+          <Divider v-if="!advancedOnly" />
 
-          <Panel :header="t('advanced_settings')" toggleable collapsed>
+          <Panel :header="t('advanced_settings')" toggleable :collapsed="!advancedOnly">
             <div class="flex flex-col gap-y-2">
 
               <div class="flex flex-row gap-x-9 flex-wrap">
@@ -387,7 +391,7 @@ function removeVpnPortalClient(index: number) {
                 </div>
               </div>
 
-              <div class="flex flex-row gap-x-9 flex-wrap">
+              <div v-if="!advancedOnly" class="flex flex-row gap-x-9 flex-wrap">
                 <div class="flex flex-col gap-2 basis-5/12 grow">
                   <label for="hostname">{{ t('hostname') }}</label>
                   <InputText id="hostname" v-model="curNetwork.hostname" aria-describedby="hostname-help" :format="true"
@@ -569,9 +573,9 @@ function removeVpnPortalClient(index: number) {
             </div>
           </Panel>
 
-          <Divider />
+          <Divider v-if="!advancedOnly" />
 
-          <Panel :header="t('port_forwards')" toggleable collapsed>
+          <Panel v-if="!advancedOnly" :header="t('port_forwards')" toggleable collapsed>
             <div ref="portForwardContainer" class="flex flex-col gap-y-2">
               <div class="flex flex-row gap-x-9 flex-wrap w-full">
                 <div class="flex flex-col gap-2 grow p-fluid">
@@ -658,9 +662,9 @@ function removeVpnPortalClient(index: number) {
             </div>
           </Panel>
 
-          <Divider />
+          <Divider v-if="!advancedOnly" />
 
-          <Panel :header="t('acl.title')" toggleable collapsed>
+          <Panel v-if="!advancedOnly" :header="t('acl.title')" toggleable collapsed>
             <div v-if="curNetwork.acl" class="flex flex-col gap-y-2">
               <AclManager v-model="curNetwork.acl" />
             </div>
@@ -670,7 +674,7 @@ function removeVpnPortalClient(index: number) {
             </div>
           </Panel>
 
-          <div class="flex pt-6 justify-center">
+          <div v-if="!advancedOnly" class="flex pt-6 justify-center">
             <Button :label="actionLabel || t('run_network')" icon="pi pi-arrow-right" icon-pos="right" :disabled="configInvalid || credentialInvalid"
               @click="$emit('runNetwork', curNetwork)" />
           </div>

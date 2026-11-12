@@ -533,6 +533,7 @@ mod tests {
             },
             virtual_cidr: None,
             secure_mode: false,
+            advanced_config: None,
             members: Vec::new(),
             credentials: Vec::new(),
             acl_policy: None,

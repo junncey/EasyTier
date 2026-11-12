@@ -32,11 +32,9 @@ mod tests {
     #[tokio::test]
     async fn migration_adds_nullable_advanced_config_column() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        db.execute_unprepared(
-            "CREATE TABLE networks (id TEXT PRIMARY KEY, network_name TEXT)",
-        )
-        .await
-        .unwrap();
+        db.execute_unprepared("CREATE TABLE networks (id TEXT PRIMARY KEY, network_name TEXT)")
+            .await
+            .unwrap();
         let manager = SchemaManager::new(&db);
         Migration.up(&manager).await.unwrap();
         db.execute_unprepared("INSERT INTO networks (id, network_name) VALUES ('n1', 'net')")

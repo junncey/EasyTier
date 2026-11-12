@@ -60,6 +60,7 @@ struct PreparedIntent {
     public_server_url: Option<String>,
     peer_urls: String,
     acl_policy: Option<String>,
+    advanced_config: Option<String>,
     members: Vec<PreparedMember>,
     credentials: Vec<PreparedCredential>,
 }
@@ -127,6 +128,7 @@ fn prepare_intent(intent: CentralNetworkIntent) -> Result<PreparedIntent, Centra
     Ok(PreparedIntent {
         peer_urls: json(&raw_peer_urls)?,
         acl_policy: intent.acl_policy.as_ref().map(json).transpose()?,
+        advanced_config: intent.advanced_config.as_ref().map(json).transpose()?,
         intent,
         networking_method,
         public_server_url,
@@ -416,8 +418,8 @@ async fn persist_intent(
         INSERT INTO networks (
             user_id, id, display_name, network_name, network_secret,
             networking_method, public_server_url, peer_urls, virtual_cidr,
-            secure_mode, acl_policy, create_time, update_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            secure_mode, acl_policy, advanced_config, create_time, update_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, id) DO UPDATE SET
             display_name = excluded.display_name,
             network_name = excluded.network_name,
@@ -428,6 +430,7 @@ async fn persist_intent(
             virtual_cidr = excluded.virtual_cidr,
             secure_mode = excluded.secure_mode,
             acl_policy = excluded.acl_policy,
+            advanced_config = excluded.advanced_config,
             update_time = excluded.update_time
         "#,
     )
@@ -442,6 +445,7 @@ async fn persist_intent(
     .bind(&prepared.intent.virtual_cidr)
     .bind(prepared.intent.secure_mode)
     .bind(&prepared.acl_policy)
+    .bind(&prepared.advanced_config)
     .bind(now)
     .bind(now)
     .execute(&mut **transaction)
@@ -545,11 +549,13 @@ async fn load_intent(
         Option<String>,
         bool,
         Option<String>,
+        Option<String>,
     );
     let row: Option<NetworkRow> = sqlx::query_as(
         r#"
         SELECT display_name, network_name, network_secret, networking_method,
-            public_server_url, peer_urls, virtual_cidr, secure_mode, acl_policy
+            public_server_url, peer_urls, virtual_cidr, secure_mode, acl_policy,
+            advanced_config
         FROM networks WHERE user_id = ? AND id = ?
         "#,
     )
@@ -568,6 +574,7 @@ async fn load_intent(
         virtual_cidr,
         secure_mode,
         acl_policy,
+        advanced_config,
     )) = row
     else {
         return Ok(None);
@@ -600,6 +607,15 @@ async fn load_intent(
         .transpose()
         .map_err(|error| {
             CentralIntentError::InvalidStoredData(format!("invalid ACL policy: {error}"))
+        })?;
+    let advanced_config = advanced_config
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| {
+            CentralIntentError::InvalidStoredData(format!(
+                "invalid network advanced config: {error}"
+            ))
         })?;
 
     type CredentialRow = (String, String, i64, String, bool, String, bool);
@@ -716,6 +732,7 @@ async fn load_intent(
         mode,
         virtual_cidr,
         secure_mode,
+        advanced_config,
         members,
         credentials,
         acl_policy,
@@ -764,6 +781,7 @@ mod tests {
             mode: NetworkMode::Standalone,
             virtual_cidr: Some("10.42.0.0/29".to_owned()),
             secure_mode: true,
+            advanced_config: None,
             members: vec![temporary.clone(), permanent],
             credentials: vec![NetworkCredentialIntent {
                 id: "temporary".to_owned(),

@@ -516,6 +516,7 @@ web:
     gateway_hint: Members are meshed automatically through this console's built-in gateway (discovery and hole-punch assistance, no data relay by default)
     advanced_mode: "Advanced: specify initial nodes manually"
     use_gateway: "Back: use the console gateway"
+    advanced_settings_hint: Advanced settings become this network's defaults; devices inherit them on joining and members may override them individually
 
   network_detail:
     tab_members: Members
@@ -546,6 +547,7 @@ web:
     delete_hint: Deleting a network removes all members and withdraws their managed configs
     gateway_followed: The initial-node list keeps only the console gateway; member configs follow the gateway URL automatically
     advanced_config: Advanced Config
+    advanced_settings_hint: Network-level defaults inherited by every member; members can override individual fields in "Edit Member", fields left untouched keep following changes made here
     has_override: This member has an advanced override
     identity_ignored: Network name and secret are owned by the network settings; those edits are ignored
     reset_default: Reset to Default

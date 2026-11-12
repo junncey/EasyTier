@@ -297,6 +297,9 @@ const settingsForm = ref({
 // Initial nodes in the same model as the GUI config form; an empty list
 // means Standalone.
 const initialNodes = ref<string[]>([]);
+// Network-level advanced settings inherited by every member; members may
+// override individual fields from this baseline.
+const settingsAdvancedForm = ref<NetworkTypes.NetworkConfig>(NetworkTypes.DEFAULT_NETWORK_ADVANCED_CONFIG());
 const settingsLoaded = ref(false);
 const savingSettings = ref(false);
 
@@ -341,6 +344,9 @@ const loadSettingsForm = () => {
             initialNodes.value = [];
             break;
     }
+    settingsAdvancedForm.value = NetworkTypes.normalizeNetworkConfig(
+        network.value.advanced_config ?? NetworkTypes.DEFAULT_NETWORK_ADVANCED_CONFIG(),
+    );
     settingsLoaded.value = true;
 };
 
@@ -362,6 +368,9 @@ const saveSettings = async () => {
             peer_urls: method === 'Manual' ? initialNodes.value : [],
             virtual_cidr: normalizeVirtualSubnet(settingsForm.value.virtual_cidr) || null,
             secure_mode: settingsForm.value.secure_mode,
+            // An untouched form compiles to schema defaults, which the
+            // backend normalizes away; only explicit edits persist.
+            advanced_config: NetworkTypes.toBackendNetworkConfig(settingsAdvancedForm.value),
         };
         await api?.update_network(networkId.value, settings, settingsForm.value.regenerate_secret ? uuidv4() : undefined);
         settingsForm.value.regenerate_secret = false;
@@ -1129,6 +1138,7 @@ const switchTab = async (tab: string) => {
             <TabPanel value="settings">
               <div v-if="!settingsLoaded" class="loading-rows"><Skeleton v-for="i in 4" :key="i" height="2rem" /></div>
               <div v-else class="settings-form">
+                <div class="settings-basic-column flex flex-col gap-4">
                 <div class="flex flex-col gap-1">
                     <label for="settings-display-name">{{ t('web.network_list.display_name') }}</label>
                     <InputText id="settings-display-name" v-model="settingsForm.display_name" />
@@ -1175,6 +1185,14 @@ const switchTab = async (tab: string) => {
                     <UrlListInput id="settings-initial-nodes" v-model="initialNodes" :protos="protos"
                         defaultUrl="tcp://:11010" :add-label="t('add_initial_node')"
                         :placeholder="t('initial_node_placeholder')" />
+                </div>
+                </div>
+                <div class="advanced-settings-section flex flex-col gap-2">
+                    <div class="flex items-center">
+                        <label>{{ t('advanced_settings') }}</label>
+                        <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t('web.network_detail.advanced_settings_hint')"></span>
+                    </div>
+                    <Config v-model:cur-network="settingsAdvancedForm" :advanced-only="true" />
                 </div>
                 <div class="flex gap-2">
                     <Button :label="t('web.common.save')" icon="pi pi-check" :loading="savingSettings" @click="saveSettings" />

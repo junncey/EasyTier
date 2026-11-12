@@ -108,7 +108,8 @@
 .network-tabs .p-tablist-tab-list { padding: 0 12px; }
 .network-tabs .p-tab { font-size: 13px; padding: 16px; }
 .network-tabs .p-tabpanel { min-width: 0; }
-.settings-form { max-width: 640px; display: flex; flex-direction: column; gap: 18px; }
+.settings-form { max-width: 52rem; display: flex; flex-direction: column; gap: 18px; }
+.settings-form .settings-basic-column { max-width: 640px; }
 .console-device-drawer.p-drawer { width: min(88vw, 960px); }
 .console-device-drawer .p-drawer-header { border-bottom: 1px solid var(--p-content-border-color); padding: 14px 16px; }
 .console-device-drawer .p-drawer-content { padding: 16px; }
