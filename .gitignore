@@ -12,7 +12,11 @@ target-*/
 
 .vscode
 /.idea
+**/.idea/
 /.direnv/
+
+# local GUI test screenshots
+/gui-test-screenshots/
 
 # perf & flamegraph
 perf.data
