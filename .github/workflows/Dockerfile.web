@@ -1,0 +1,30 @@
+# Runtime image for the self-hosted EasyTier console (`easytier-web`, frontend
+# embedded with `--features embed`) plus the `easytier-core` / `easytier-cli`
+# binaries from the same commit.
+#
+# The build context is staged by `.github/workflows/docker-acr.yml`: it holds
+# only the release binaries and this Dockerfile, so no source tree is sent to
+# the builder. The binaries are GNU-target builds from ubuntu-24.04, hence the
+# matching runtime base.
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY easytier-web easytier-core easytier-cli /usr/local/bin/
+
+# et.db defaults to the working directory; keep it on a volume so the
+# container can be replaced without losing networks, devices and users.
+ENV TZ=Asia/Shanghai \
+    ET_WEB_DB=/data/et.db
+
+WORKDIR /data
+VOLUME ["/data"]
+
+# 11211/tcp: REST API and embedded console
+# 22020/udp: config server that members poll for their compiled config
+EXPOSE 11211
+EXPOSE 22020/udp
+
+ENTRYPOINT ["/usr/local/bin/easytier-web"]

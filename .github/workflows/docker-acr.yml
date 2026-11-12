@@ -1,0 +1,197 @@
+# ============================================================
+# EasyTier Console —— 编译 linux/amd64 二进制并推送阿里云 ACR
+#
+# 产物：
+#   1) Docker 镜像 <ACR>/<namespace>/<image>:<version> 与 :latest
+#      入口 easytier-web（前端已 embed），镜像内同时带 easytier-core /
+#      easytier-cli，可用 --entrypoint 直接跑核心。
+#   2) Workflow artifact: easytier-web-linux-amd64.tar.gz（三个二进制）
+#
+# 触发：
+#   - 手动：Actions -> 左侧本工作流 -> Run workflow（可填镜像标签）
+#   - 推送 feat/** 分支且改动命中下方 paths 时自动构建
+#
+# 仓库 Secrets（Settings -> Secrets and variables -> Actions）：
+#   ALIYUN_REGISTRY_USERNAME / ALIYUN_REGISTRY_PASSWORD
+#
+# 可选 Variables（不配置则用默认值）：
+#   ALIYUN_REGISTRY  : 默认 crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com
+#   ALIYUN_NAMESPACE : 默认 b1at
+#   IMAGE_NAME       : 默认 easytier-web
+#
+# 备注：ACR 个人版不支持 BuildKit 的 provenance/SBOM 清单，必须显式关闭，
+# 否则推送报 unknown manifest class for application/vnd.oci.empty.v1+json。
+# ============================================================
+name: Docker Image (ACR)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '镜像标签（留空则取 easytier-web 的 Cargo 版本，如 v2.7.0）'
+        required: false
+        default: ''
+        type: string
+  push:
+    branches: ['feat/**']
+    paths:
+      - 'easytier-web/**'
+      - 'easytier/**'
+      - 'easytier-core/**'
+      - 'easytier-proto/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+      - '.github/actions/**'
+      - '.github/workflows/docker-acr.yml'
+      - '.github/workflows/Dockerfile.web'
+
+env:
+  REGISTRY: ${{ vars.ALIYUN_REGISTRY || 'crpi-a3ur4k2rueat32kn.cn-beijing.personal.cr.aliyuncs.com' }}
+  NAMESPACE: ${{ vars.ALIYUN_NAMESPACE || 'b1at' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'easytier-web' }}
+
+concurrency:
+  group: docker-acr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build amd64 and push to ACR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check ACR secrets
+        env:
+          ACR_USER: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          ACR_PASS: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ACR_USER}" ] || [ -z "${ACR_PASS}" ]; then
+            echo "::error::缺少仓库 Secrets：ALIYUN_REGISTRY_USERNAME / ALIYUN_REGISTRY_PASSWORD"
+            exit 1
+          fi
+
+      # 官方 composite action：protoc 35.1、Rust 1.95、Node 22、pnpm 10，
+      # 并按 filter 构建 easytier-web 前端（含 config-generator 合并进 dist）。
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          gui: false
+          pnpm: true
+          pnpm-build-filter: './easytier-web/*'
+          token: ${{ github.token }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docker-acr-linux-amd64
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p easytier -p easytier-web \
+            --features easytier-web/embed
+
+      - name: Resolve image tag
+        id: tag
+        env:
+          INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' easytier-web/Cargo.toml | head -n1)"
+          if [ -z "${VERSION}" ]; then
+            echo "::error::无法从 easytier-web/Cargo.toml 读取版本号"
+            exit 1
+          fi
+
+          TAG=""
+          if [ "${REF_TYPE}" = "tag" ]; then
+            TAG="${REF_NAME#v}"
+          elif [ -n "${INPUT_IMAGE_TAG}" ]; then
+            if ! [[ "${INPUT_IMAGE_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::image_tag 含非法字符（仅允许 A-Za-z0-9 . _ -）: ${INPUT_IMAGE_TAG}"
+              exit 1
+            fi
+            TAG="${INPUT_IMAGE_TAG}"
+          else
+            TAG="v${VERSION}"
+          fi
+
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Image tag: ${TAG} (Cargo version ${VERSION})"
+
+      - name: Stage binaries and docker context
+        run: |
+          set -euo pipefail
+          for bin in easytier-web easytier-core easytier-cli; do
+            test -x "target/release/${bin}" || { echo "::error::缺少产物 target/release/${bin}"; exit 1; }
+          done
+
+          rm -rf dist docker-context
+          mkdir -p dist docker-context
+          cp target/release/easytier-web target/release/easytier-core target/release/easytier-cli dist/
+          chmod +x dist/*
+
+          tar -czf easytier-web-linux-amd64.tar.gz -C dist .
+          cp dist/* docker-context/
+          cp .github/workflows/Dockerfile.web docker-context/Dockerfile
+
+          ls -lh dist easytier-web-linux-amd64.tar.gz
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: easytier-web-linux-amd64
+          path: easytier-web-linux-amd64.tar.gz
+          if-no-files-found: error
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Alibaba Cloud ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-context
+          file: docker-context/Dockerfile
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Summary
+        run: |
+          {
+            echo "## 构建完成"
+            echo ""
+            echo "- 镜像：\`${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}\`"
+            echo "- 版本：\`${{ steps.tag.outputs.version }}\`（同时更新 \`latest\`）"
+            echo "- 二进制：工作流 artifact \`easytier-web-linux-amd64\`"
+            echo ""
+            echo "服务器拉取："
+            echo '```bash'
+            echo "docker pull ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}"
+            echo '```'
+            echo ""
+            echo "> ACR 个人版没有删除标签的 OpenAPI，旧标签需在控制台手动清理。"
+          } >> "${GITHUB_STEP_SUMMARY}"
